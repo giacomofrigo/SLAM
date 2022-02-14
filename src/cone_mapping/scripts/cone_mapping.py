@@ -5,6 +5,7 @@ import rospy
 import math
 from std_msgs.msg import Float32MultiArray, String
 from geometry_msgs.msg import PoseStamped, Pose2D, PoseArray, Pose
+from etdv_messages.msg import ConePositionArrayStamped
 
 
 class ConeMapper:
@@ -14,7 +15,7 @@ class ConeMapper:
 		self.position = PoseStamped()
 
 		self.detected_cones = []
-		self.distance_threshold = 1.8
+		self.distance_threshold = 2
 		self.confidence_threshold = 2
 
 		# Subscribers
@@ -22,18 +23,21 @@ class ConeMapper:
 			"/pose_stamped", PoseStamped, callback=self.pose_callback
 		)
 		self.sub_cone = rospy.Subscriber(
-			"/sensor_fusion/output", Float32MultiArray, callback=self.cone_callback
+			"/sensor_fusion/detections_xyz", ConePositionArrayStamped, callback=self.cone_callback
 		)
 
 		# Publishers
 		self.pub_right = rospy.Publisher(
-			"/cone_right", PoseArray, latch=True, queue_size=1
+			"/cone_right", PoseArray, latch=False, queue_size=1
 		)
 		self.pub_left = rospy.Publisher(
-			"/cone_left", PoseArray, latch=True, queue_size=1
+			"/cone_left", PoseArray, latch=False, queue_size=1
 		)
 		self.pub_start = rospy.Publisher(
-			"/cone_orange", PoseArray, latch=True, queue_size=1
+			"/cone_orange", PoseArray, latch=False, queue_size=1
+		)
+		self.pub_unknown = rospy.Publisher(
+			"/cone_unknown", PoseArray, latch=False, queue_size=1
 		)
 
 	def pose_callback(self, msg: PoseStamped):
@@ -64,35 +68,40 @@ class ConeMapper:
 		return closer_cone, min_index, min_distance
 
 
-	def cone_callback(self, msg: Float32MultiArray):
+	def cone_callback(self, msg: ConePositionArrayStamped):
 		axis2index = {"x": 0, "y": 1, "z": 2, "c": 3}
-		noise_threshold = 3
+		noise_threshold = 20
 
-		# read each cone's position
-		for i in range(0, len(msg.data), 4):
-			x = msg.data[i + axis2index["x"]]
-			y = msg.data[i + axis2index["y"]]
+		# for each detection
+		for detection in msg.positions:
+
+			x = detection.position.x
+			y = detection.position.y
+			#rospy.loginfo("Analyzing detection at {} ".format((x,y)))
 
 			# filter the object if it's too distant
 			if x <= 0 or x > noise_threshold or y == 0 or abs(y) > noise_threshold:
+				rospy.logwarn("Object {} too distant: discarded.".format((x,y)))
 				continue
 
 			# compute cone_x and cone_y that represents the absolute detected position
 			cone_x = self.position.pose.position.x + x
 			cone_y = self.position.pose.position.y + y
 
-			color = int(msg.data[i + axis2index["c"]])
+			#rospy.loginfo("Summed to car position: {} ".format((cone_x,cone_y)))
+
+			color = detection.type
 
 			# compute the closer cone in the list of already detected cones
 			closer_cone, cone_index, _ = self.get_closer_cone(cone_x, cone_y) # distance is never used
 
 			# if there is no detected cones in the nearby of this cone, insert the new cone in the detected cones data structure
 			if closer_cone is None:
-				rospy.loginfo("No close cones are found")
+				#rospy.loginfo("No close cones are found")
 				self.detected_cones.append({'x': cone_x, 'y': cone_y, 'colors': [color], 'detections': [(cone_x, cone_y)]})
 			# otherwise append the color detected this time to the closer cone
 			else:
-				rospy.loginfo("Close cone detected: {}".format((closer_cone['x'], closer_cone['y'])))
+				#rospy.loginfo("Close cone detected: {}".format((closer_cone['x'], closer_cone['y'])))
 				self.detected_cones[cone_index]['colors'].append(color)
 				self.detected_cones[cone_index]['detections'].append((cone_x, cone_y))
 
@@ -129,24 +138,18 @@ class ConeMapper:
 		orange_cones = PoseArray()
 		yellow_cones = PoseArray()
 		blue_cones = PoseArray()
+		unknown_cones = PoseArray()
 
 		# for each cone in the detected cones data structure
 		for detected_cone in self.detected_cones:
-			# number of times such cone has been seen
-			cone_detections = len(detected_cone['detections'])
 			# if the cone has been seen less then confidence threshold just ignore it
-			if cone_detections < self.confidence_threshold:
+			if len(detected_cone['detections']) < self.confidence_threshold:
 				rospy.loginfo("Cone {} below confidence threshold".format((detected_cone['x'], detected_cone['y'])))
 				continue
 			
-			# compute avg x and avg y
-			sum_x, sum_y = 0, 0
-			for x, y in detected_cone['detections']:
-				sum_x += x
-				sum_y += y
-			
-			avg_x = sum_x / cone_detections
-			avg_y = sum_y / cone_detections
+			# compute avg x and y
+			avg_x = sum([x for x,_ in detected_cone['detections']]) / len(detected_cone['detections'])
+			avg_y = sum([y for _,y in detected_cone['detections']]) / len(detected_cone['detections'])
 
 			# assign detected cone x and y as the average x and y over the detections
 			detected_cone['x'] = avg_x
@@ -154,7 +157,7 @@ class ConeMapper:
 
 			# find the most frequent color
 			detected_color = self.get_cone_color(detected_cone)
-			rospy.loginfo("Cone [{}] most frequent color: {}".format((detected_cone['x'], detected_cone['y']), detected_color))
+			#rospy.loginfo("Cone [{}] most frequent color: {}".format((detected_cone['x'], detected_cone['y']), detected_color))
 
 			# create the cone (Pose object)
 			cone = Pose()
@@ -166,29 +169,33 @@ class ConeMapper:
 				orange_cones.poses.append(cone)
 			elif detected_color == 2:
 				yellow_cones.poses.append(cone)
-			else:
+			elif detected_color == 3:
 				blue_cones.poses.append(cone)
+			else:
+				unknown_cones.poses.append(cone)
 			
-			
-		return orange_cones, yellow_cones, blue_cones
+			print("Cone [{}] most frequent color: {}\nDetections: {}\n".format((avg_x, avg_y), detected_color, detected_cone['detections']))
+
+		return orange_cones, yellow_cones, blue_cones, unknown_cones
 
 
 def main():
-    rospy.init_node("cone_mapping")
+	rospy.init_node("cone_mapping")
+	print("Start node cone_mapping")
+	cone_mapper = ConeMapper()
+	rate = rospy.Rate(20)
+	while not rospy.is_shutdown():
+		orange_cones, yellow_cones, blue_cones, unknown_cones = cone_mapper.get_detected_cones()
+		cone_mapper.pub_left.publish(blue_cones)
+		cone_mapper.pub_right.publish(yellow_cones)
+		cone_mapper.pub_start.publish(orange_cones)
+		cone_mapper.pub_unknown.publish(unknown_cones)
 
-    print("Start node cone_mapping")
-    cone_mapper = ConeMapper()
-    rate = rospy.Rate(5)
-    while not rospy.is_shutdown():
-        orange_cones, yellow_cones, blue_cones = cone_mapper.get_detected_cones()
-        cone_mapper.pub_left.publish(blue_cones)
-        cone_mapper.pub_right.publish(yellow_cones)
-        cone_mapper.pub_start.publish(orange_cones)
-        rate.sleep()
+		rate.sleep()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except rospy.ROSInterruptException:
-        pass
+	try:
+		main()
+	except rospy.ROSInterruptException:
+		pass
