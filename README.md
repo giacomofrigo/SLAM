@@ -31,7 +31,10 @@ If `catkin_make` fails due to missing `csm` package, install it:
 foo@bar:~$ cd src
 foo@bar:~$ git clone https://github.com/AndreaCensi/csm
 ```
-
+You can install also using 
+```
+apt install ros-noetic-csm
+```
 Overwrite the following files:
 
 ```console
